@@ -109,7 +109,18 @@ class BrowserCameraProcessor:
         try:
             if self._model is None or self._detector is None:
                 raise RuntimeError("Recognition model is not initialized.")
-            results = self._detector.detect(frame)
+            # Run MediaPipe on a smaller inference copy to reduce per-frame
+            # detection cost. Landmark coordinates are normalized, so they can
+            # still be drawn on the full-resolution preview frame.
+            inference_frame = frame
+            if frame.shape[1] > 640:
+                scale = 640.0 / frame.shape[1]
+                inference_frame = cv2.resize(
+                    frame,
+                    (640, max(1, int(frame.shape[0] * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            results = self._detector.detect(inference_frame)
             hands = parse_hands(results)
             self._detector.draw_landmarks(frame, hands)
 
