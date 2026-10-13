@@ -979,6 +979,11 @@ with video_col:
             mode=WebRtcMode.SENDRECV,
             video_frame_callback=local_worker.recv,
             media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]}
+                ]
+            },
             async_processing=True,
         )
         local_worker.set_running(bool(ctx.state.playing))
