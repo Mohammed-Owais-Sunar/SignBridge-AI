@@ -49,12 +49,13 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 # Make the project importable regardless of the working directory
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import camera_worker, mjpeg_server
+from src import browser_camera
 from src.config import (MIN_PREDICTION_CONFIDENCE,
                         MODEL_PATH as HAND_MODEL_PATH, MODEL_URL,
                         PREDICTION_VOTE_WINDOW, SIGN_CLASSES)
@@ -648,7 +649,7 @@ div[data-testid="stColumn"]
 @st.cache_resource(show_spinner=False)
 def get_worker():
     """One process-wide CameraWorker (shared feed, one camera)."""
-    return camera_worker.CameraWorker()
+    return browser_camera.BrowserCameraProcessor()
 
 
 @st.cache_resource(show_spinner=False)
@@ -964,62 +965,39 @@ st.markdown('<div class="sb-section sb-section-first">Live Recognition'
 video_col, panel_col = st.columns([1.5, 1], gap="large")
 
 with video_col:
-    # The camera panel is one ticking region: control + preview together.
-    # Its click re-runs only this fragment, so Start/Stop swaps the preview
-    # immediately and the button label follows on the next tick. On every
-    # other tick the markup is byte-identical, so React keeps the same
-    # <img> node and the MJPEG connection is never reconnected.
+    # WebRTC captures from the VISITOR'S browser. Unlike cv2.VideoCapture(0),
+    # this works on Streamlit Community Cloud where the server has no webcam.
     @st.fragment(run_every=run_every)
     def camera_fragment():
         local_worker = get_worker()
         local_worker.touch()
-        live_now = local_worker.running and local_worker.is_alive()
+        try:
+            model, class_names = get_model()
+            detector = get_detector()
+            local_worker.configure(model, class_names, detector)
+        except Exception as error:  # noqa: BLE001 - surface setup errors
+            local_worker.set_running(False)
+            st.error(f"Could not initialize recognition: {error}")
+            return
 
-        camera_title, camera_control = st.columns([1, 0.6], gap="small")
-        with camera_title:
-            st.markdown('<div class="sb-panel-title">Live Camera</div>',
-                        unsafe_allow_html=True)
-        with camera_control:
-            if live_now:
-                if st.button("Stop camera", width="stretch",
-                             key="camera_toggle"):
-                    local_worker.stop()   # thread releases the camera
-                    st.session_state["sb_start_error"] = ""
-            elif st.button("Start camera", type="primary", width="stretch",
-                           key="camera_toggle"):
-                # Stored, not rendered: this branch runs only on the click,
-                # while the message must survive the following ticks.
-                st.session_state["sb_start_error"] = start_worker() or ""
-
-        if not live_now:
-            start_error = st.session_state.get("sb_start_error") or ""
-            if start_error:
-                st.error(start_error)
-            elif local_worker.error:
-                st.error(local_worker.error)
-
-        if local_worker.running and local_worker.is_alive():
-            # The browser pulls MJPEG frames straight from the feed server;
-            # Streamlit never sees a single one of them. The note lives
-            # INSIDE the card so both workspace columns are title + card
-            # and their bottom edges meet on the same line.
-            st.markdown(
-                '<div class="sb-card">'
-                f'<img class="sb-video" src="{mjpeg_server.feed_url()}"'
-                ' alt="Live camera preview">'
-                '<div class="sb-video-note">Mirrored preview. The MJPEG '
-                "feed keeps video outside Streamlit's render loop; "
-                "recognition runs in the background worker (Phase 5/6 "
-                "pipeline, unchanged).</div></div>",
-                unsafe_allow_html=True)
+        st.markdown('<div class="sb-panel-title">Browser Webcam</div>',
+                    unsafe_allow_html=True)
+        ctx = webrtc_streamer(
+            key="signbridge-browser-webcam",
+            mode=WebRtcMode.SENDRECV,
+            video_frame_callback=local_worker.recv,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+        local_worker.set_running(bool(ctx.state.playing))
+        if ctx.state.playing:
+            st.caption("Camera is streaming from this browser. Allow camera access "
+                       "when prompted; gestures are processed on the app server.")
         else:
-            st.markdown(
-                '<div class="sb-card"><div class="sb-video-off">'
-                "Camera is off</div>"
-                '<div class="sb-video-note">Start the camera to run the '
-                "MediaPipe Hand Landmarker and the Random Forest on the "
-                "webcam feed.</div></div>",
-                unsafe_allow_html=True)
+            st.caption("Press START above and allow browser camera permission. "
+                       "HTTPS is required for deployed webcam access.")
+        if local_worker.error and not ctx.state.playing:
+            st.error(local_worker.error)
 
     camera_fragment()
 
