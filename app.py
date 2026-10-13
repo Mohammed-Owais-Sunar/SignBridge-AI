@@ -678,21 +678,13 @@ def get_metrics():
 # Start helper (runs in the page thread: model + detector already cached)
 # ---------------------------------------------------------------------------
 def start_worker() -> str:
-    """Start the feed; returns an error message or '' on success."""
-    with st.spinner("Loading model and hand detector..."):
-        try:
-            model, class_names = get_model()
-        except SystemExit as error:
-            return str(error)
-        if not HAND_MODEL_PATH.exists():
-            return (f"Hand landmark model not found: {HAND_MODEL_PATH}\n"
-                    f'Download it once: Invoke-WebRequest -Uri "{MODEL_URL}" '
-                    f'-OutFile "models\\hand_landmarker.task"')
-        try:
-            detector = get_detector()
-        except Exception as error:  # noqa: BLE001 - MediaPipe init failure
-            return f"Could not initialize the MediaPipe hand detector: {error}"
-    get_worker().start(model, class_names, detector)
+    """Initialize cached recognition resources for the browser callback."""
+    try:
+        model, class_names = get_model()
+        detector = get_detector()
+        get_worker().configure(model, class_names, detector)
+    except Exception as error:  # noqa: BLE001 - show initialization issue
+        return f"Could not initialize recognition: {error}"
     return ""
 
 
