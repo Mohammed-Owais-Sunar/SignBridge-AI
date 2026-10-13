@@ -123,8 +123,9 @@ MIN_PREDICTION_CONFIDENCE = 0.50
 # over the last PREDICTION_VOTE_WINDOW raw predictions. It only smooths the
 # DISPLAY - the classifier itself is untouched, and the raw per-frame
 # prediction is always shown on the overlay and printed when it changes.
-# Set to 0 to disable voting entirely.
-PREDICTION_VOTE_WINDOW = 5
+# Set to 0 to disable voting entirely. A 3-frame window is more responsive
+# for browser webcam streaming while retaining a small amount of smoothing.
+PREDICTION_VOTE_WINDOW = 3
 
 # REAL-TIME PARALLELISM: the forest was TRAINED with n_jobs=-1 (see
 # RANDOM_FOREST_PARAMS), but for single-sample prediction the parallel
