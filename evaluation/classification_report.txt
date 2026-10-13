@@ -1,0 +1,45 @@
+SIGNBRIDGE AI - PHASE 4 CLASSIFICATION REPORT
+============================================================
+Dataset          : C:\Users\moham\SignBridge-AI\data\processed\dataset.csv
+Samples (valid)  : 1800 (1440 train / 360 test, test_size=0.2, stratified, random_state=42)
+Features         : 126
+Classes          : 12
+Model            : RandomForestClassifier
+Parameters       : {"max_features": "sqrt", "n_estimators": 200, "n_jobs": -1, "random_state": 42}
+
+OVERALL METRICS
+Accuracy         : 0.9861
+Precision (macro)      : 0.9864
+Recall (macro)         : 0.9861
+F1 (macro)             : 0.9861
+Precision (weighted)   : 0.9864
+Recall (weighted)      : 0.9861
+F1 (weighted)          : 0.9861
+
+PER-CLASS REPORT (test set, class order = Phase 3 SIGN_CLASSES)
+              precision    recall  f1-score   support
+
+       HELLO       0.97      0.97      0.97        30
+         YES       0.97      1.00      0.98        30
+          NO       1.00      0.97      0.98        30
+   THANK_YOU       1.00      1.00      1.00        30
+      PLEASE       1.00      1.00      1.00        30
+        HELP       1.00      0.97      0.98        30
+       SORRY       1.00      1.00      1.00        30
+  I_LOVE_YOU       0.97      1.00      0.98        30
+        GOOD       1.00      0.97      0.98        30
+         BAD       0.97      0.97      0.97        30
+       SPACE       0.97      1.00      0.98        30
+      DELETE       1.00      1.00      1.00        30
+
+    accuracy                           0.99       360
+   macro avg       0.99      0.99      0.99       360
+weighted avg       0.99      0.99      0.99       360
+
+
+Notes:
+- Macro/weighted averages are identical here because every class has
+  the same number of test samples (stratified split of a balanced
+  dataset).
+- Metrics are computed ONLY on the held-out test split; the model
+  was fit exclusively on the training split.

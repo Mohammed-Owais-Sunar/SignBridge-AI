@@ -1,0 +1,22 @@
+# Phase 8 - Streamlit theme for the SignBridge AI web interface.
+# Deliberately restrained (project design rules):
+#   - dark neutral background, ONE accent colour
+#   - one success / one warning / one error colour (set in app.py CSS)
+#   - borders and spacing instead of shadows, gradients or glass effects
+
+[theme]
+base = "dark"
+primaryColor = "#4F8CE8"
+backgroundColor = "#0F1115"
+secondaryBackgroundColor = "#161A21"
+textColor = "#E3E6EB"
+font = "sans serif"
+
+[client]
+# Hide the "Deploy" toolbar button - this is a local prototype, not a
+# hosted product. The footer stays visible (honest about the tech used).
+toolbarMode = "minimal"
+
+[browser]
+# No telemetry sent to Streamlit.
+gatherUsageStats = false

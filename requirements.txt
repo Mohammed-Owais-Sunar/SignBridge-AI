@@ -1,0 +1,5 @@
+opencv-python
+mediapipe==0.10.35
+scikit-learn
+joblib
+streamlit
