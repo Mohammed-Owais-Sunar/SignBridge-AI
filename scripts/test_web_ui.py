@@ -26,6 +26,7 @@ WHAT IS CHECKED
 
 import ast
 import json
+import os
 import re
 import sys
 import time
@@ -37,6 +38,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 APP_PATH = PROJECT_ROOT / "app.py"
 WORKER_PATH = PROJECT_ROOT / "src" / "camera_worker.py"
 FEED_PATH = PROJECT_ROOT / "src" / "mjpeg_server.py"
+BROWSER_PATH = PROJECT_ROOT / "src" / "browser_camera.py"
+MODE_PATH = PROJECT_ROOT / "src" / "camera_mode.py"
 CONFIG_PATH = PROJECT_ROOT / ".streamlit" / "config.toml"
 METRICS_PATH = PROJECT_ROOT / "evaluation" / "metrics.json"
 
@@ -93,6 +96,10 @@ def main() -> int:
                      if WORKER_PATH.exists() else "")
     feed_source = FEED_PATH.read_text(encoding="utf-8") \
         if FEED_PATH.exists() else ""
+    browser_source = (BROWSER_PATH.read_text(encoding="utf-8")
+                      if BROWSER_PATH.exists() else "")
+    mode_source = (MODE_PATH.read_text(encoding="utf-8")
+                   if MODE_PATH.exists() else "")
     both = (source + "\n" + worker_source).lower()
 
     # --- A: files + dependencies ------------------------------------------
@@ -109,6 +116,10 @@ def main() -> int:
         encoding="utf-8").lower()
     check("A3. requirements.txt includes streamlit",
           "streamlit" in requirements)
+    check("A4. requirements.txt includes streamlit-webrtc (browser webcam)",
+          "streamlit-webrtc" in requirements)
+    check("A5. browser camera + mode modules exist",
+          BROWSER_PATH.exists() and MODE_PATH.exists())
 
     # --- B: scope discipline ----------------------------------------------
     print("\nB. Scope discipline (reused pipeline, no TTS, no marketing)")
@@ -138,6 +149,32 @@ def main() -> int:
                if text not in source and text not in worker_source]
     check("B5. reuses Phase 5/6 modules unchanged", not missing,
           "missing: " + ", ".join(missing) if missing else "")
+    browser_reused = ("predict_gesture", "build_sample", "VoteWindow",
+                      "parse_hands", "observe(", "SentenceBuilder")
+    browser_missing = [text for text in browser_reused
+                       if text not in browser_source]
+    check("B5b. browser camera path reuses the same pipeline",
+          not browser_missing,
+          "missing: " + ", ".join(browser_missing) if browser_missing else "")
+    browser_reimplemented = ("def build_sample", "def predict_gesture",
+                             "class VoteWindow", "class HandDetector",
+                             "class SentenceBuilder")
+    browser_hits = [text for text in browser_reimplemented
+                    if text in source or text in browser_source]
+    # AST-based device check: the browser_camera.py docstring legitimately
+    # NAMES cv2.VideoCapture when explaining why the server cannot use it.
+    browser_tree = ast.parse(browser_source)
+    opens_device = any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "VideoCapture"
+        for node in ast.walk(browser_tree))
+    check("B5c. browser path never re-implements the pipeline and never "
+          "opens a camera device itself",
+          not browser_hits and not opens_device,
+          "found: " + ", ".join(browser_hits) + f" device_call={opens_device}")
+    check("B5d. app.py wires the browser path (processor + mode switch)",
+          "from src import browser_camera, camera_mode" in source
+          and "render_browser_camera" in source)
     check("B6. displayed numbers come from evaluation/metrics.json",
           "metrics.json" in source and METRICS_PATH.exists())
     ok, detail = _compile_ok(APP_PATH)
@@ -146,6 +183,10 @@ def main() -> int:
     check("B7b. camera_worker.py compiles", ok, detail)
     ok, detail = _compile_ok(FEED_PATH)
     check("B7c. mjpeg_server.py compiles", ok, detail)
+    ok, detail = _compile_ok(BROWSER_PATH)
+    check("B7d. browser_camera.py compiles", ok, detail)
+    ok, detail = _compile_ok(MODE_PATH)
+    check("B7e. camera_mode.py compiles", ok, detail)
 
     # --- C: real numbers only ---------------------------------------------
     print("\nC. Real numbers (pinned to Phase 4 evaluation artifacts)")
@@ -176,6 +217,12 @@ def main() -> int:
         check("D0. streamlit AppTest available", False, str(error))
         return _summary()
 
+    # Force the SERVER camera mode for the headless run: AppTest renders
+    # no browser, so the webrtc_streamer component cannot be exercised
+    # here, and auto mode would probe the real webcam. app.py reads the
+    # variable once per script run; this locks the local-Windows path
+    # (Start button, MJPEG preview) deterministically.
+    os.environ["SIGNBRIDGE_CAMERA_MODE"] = "server"
     app_test = AppTest.from_file(str(APP_PATH), default_timeout=60)
     app_test.run()
     check("D1. page renders without exception", not app_test.exception,
@@ -221,6 +268,38 @@ def main() -> int:
           "Start signing to build your message" in page
           and "(empty)" not in page,
           "empty state text")
+
+    # --- D (browser mode): no crash when the component cannot run ---------
+    # AppTest mocks the Streamlit Runtime, which streamlit-webrtc's
+    # component requires; the page must show a clear error banner instead
+    # of an uncaught exception. Runs in a SUBPROCESS: st.cache_resource is
+    # process-wide, and the server-mode AppTest above already cached its
+    # CameraWorker - a second in-process run would reuse that instead of
+    # building the browser processor. Actual WebRTC negotiation needs a
+    # real browser; the frame path is covered by
+    # scripts/test_browser_camera.py.
+    import subprocess
+    env = dict(os.environ, SIGNBRIDGE_CAMERA_MODE="browser")
+    completed = subprocess.run(
+        [sys.executable, "-c",
+         "from streamlit.testing.v1 import AppTest\n"
+         "t = AppTest.from_file('app.py', default_timeout=60)\n"
+         "t.run()\n"
+         "print('MARKER_EXCEPTION', bool(t.exception))\n"
+         "print('MARKER_ERRORS', repr([str(e.value) for e in t.error]))\n"],
+        capture_output=True, text=True, timeout=180,
+        cwd=str(PROJECT_ROOT), env=env)
+    browser_out = completed.stdout + completed.stderr
+    check("D10. browser mode renders without an uncaught exception",
+          completed.returncode == 0
+          and "MARKER_EXCEPTION False" in completed.stdout,
+          browser_out[-200:])
+    browser_errors = ""
+    for line in completed.stdout.splitlines():
+        if line.startswith("MARKER_ERRORS "):
+            browser_errors = line
+    check("D11. browser component failure shows a clear error banner",
+          "browser camera" in browser_errors, browser_errors[:160])
 
     # --- E: performance architecture (the 6 FPS fix) -----------------------
     print("\nE. Performance architecture (video outside the render loop)")
@@ -269,8 +348,21 @@ def main() -> int:
           and "from streamlit" not in worker_source)
     check("E9. page keepalive touches the worker (auto camera release)",
           "touch()" in source and "_activity" in worker_source)
-    check("E10. no WebRTC dependency was needed",
-          "streamlit_webrtc" not in both and "aiortc" not in both)
+    # E10 (re-scoped): the 6 FPS architecture no longer needs WebRTC, but
+    # the Cloud deployment needs the browser webcam path. The invariant is
+    # now that WebRTC stays CONFINED to the browser path in app.py - the
+    # OpenCV worker (and its MJPEG feed) must remain WebRTC/Streamlit-free
+    # so local Windows behaviour is untouched.
+    check("E10. WebRTC confined to the browser path (worker stays clean)",
+          "streamlit_webrtc" not in worker_source
+          and "aiortc" not in worker_source
+          and "streamlit_webrtc" in source)
+    check("E12. camera mode selection via SIGNBRIDGE_CAMERA_MODE, "
+          "auto probes safely",
+          "SIGNBRIDGE_CAMERA_MODE" in mode_source
+          and "MODE_SERVER" in mode_source
+          and "MODE_BROWSER" in mode_source
+          and "probe_server_camera" in mode_source)
     # E11: _LatestFrame.wait_new() must BLOCK while there is nothing new
     # to send. A client that connects BEFORE the worker's first frame
     # (last_seq -1 vs _seq 0) used to make it return immediately, so the

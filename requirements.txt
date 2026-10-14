@@ -6,3 +6,9 @@ mediapipe==0.10.35
 scikit-learn
 joblib
 streamlit
+# Browser webcam path for Streamlit Community Cloud (the server has no
+# camera there; the visitor's browser provides the frames). Verified
+# import-compatible with the pinned streamlit version (see DEBUGGING_
+# REPORT.md environment). Local OpenCV mode does not need it but installs
+# it without conflict.
+streamlit-webrtc==0.78.1

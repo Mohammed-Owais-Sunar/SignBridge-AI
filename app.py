@@ -50,11 +50,19 @@ from pathlib import Path
 
 import streamlit as st
 
+try:
+    # Only the browser camera mode needs streamlit-webrtc; a missing
+    # package is reported when browser mode is actually selected.
+    from streamlit_webrtc import WebRtcMode, webrtc_streamer
+except ImportError:
+    WebRtcMode = None
+    webrtc_streamer = None
+
 # Make the project importable regardless of the working directory
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import camera_worker, mjpeg_server
+from src import browser_camera, camera_mode, camera_worker, mjpeg_server
 from src.config import (MIN_PREDICTION_CONFIDENCE,
                         MODEL_PATH as HAND_MODEL_PATH, MODEL_URL,
                         PREDICTION_VOTE_WINDOW, SIGN_CLASSES)
@@ -64,6 +72,23 @@ from src.sentence_builder import NO_HAND_LABEL
 from scripts.predict_realtime import load_classifier
 
 METRICS_PATH = PROJECT_ROOT / "evaluation" / "metrics.json"
+
+# Camera mode for THIS script run, resolved ONCE in the main-script scope
+# (never inside a ticking fragment, so the decision is stable):
+#   server  -> the existing OpenCV pipeline (local Windows): CameraWorker
+#              captures, the MJPEG feed previews, ~30 FPS, no browser
+#              permission involved.
+#   browser -> Streamlit Community Cloud: the server has no webcam, so
+#              streamlit-webrtc captures the VISITOR'S camera and pipes
+#              frames into the same recognition pipeline.
+# SIGNBRIDGE_CAMERA_MODE=auto|server|browser (auto probes the OpenCV
+# camera - no lock taken, stderr suppressed - and falls back to browser
+# when none exists). The two pipelines are mutually exclusive: get_worker()
+# below returns exactly one processor for the resolved mode.
+CAMERA_MODE = camera_mode.resolve_camera_mode()
+if CAMERA_MODE == camera_mode.MODE_BROWSER:
+    print("[camera-mode] no server camera available (or browser mode "
+          "forced) - using the browser webcam path", flush=True)
 
 # UI statistics refresh rate. The video does NOT depend on it - it
 # streams through the MJPEG feed - so the panel can update several
@@ -647,7 +672,11 @@ div[data-testid="stColumn"]
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_worker():
-    """One process-wide CameraWorker (shared feed, one camera)."""
+    """One process-wide processor; the resolved mode makes the OpenCV
+    worker and the browser processor mutually exclusive - they can never
+    run at the same time."""
+    if CAMERA_MODE == camera_mode.MODE_BROWSER:
+        return browser_camera.BrowserCameraProcessor()
     return camera_worker.CameraWorker()
 
 
@@ -674,24 +703,104 @@ def get_metrics():
 
 
 # ---------------------------------------------------------------------------
-# Start helper (runs in the page thread: model + detector already cached)
+# Shared recognition resources (runs in the page thread, already cached)
 # ---------------------------------------------------------------------------
-def start_worker() -> str:
-    """Start the feed; returns an error message or '' on success."""
+def load_recognition_resources():
+    """(model, class_names, detector) or an error message - never both.
+
+    Both camera modes share the cached Random Forest and MediaPipe
+    detector; they are loaded once per process, never per frame.
+    """
     with st.spinner("Loading model and hand detector..."):
         try:
             model, class_names = get_model()
         except SystemExit as error:
-            return str(error)
+            return None, str(error)
         if not HAND_MODEL_PATH.exists():
-            return (f"Hand landmark model not found: {HAND_MODEL_PATH}\n"
+            return (None,
+                    f"Hand landmark model not found: {HAND_MODEL_PATH}\n"
                     f'Download it once: Invoke-WebRequest -Uri "{MODEL_URL}" '
                     f'-OutFile "models\\hand_landmarker.task"')
         try:
             detector = get_detector()
         except Exception as error:  # noqa: BLE001 - MediaPipe init failure
-            return f"Could not initialize the MediaPipe hand detector: {error}"
+            return None, (f"Could not initialize the MediaPipe hand "
+                          f"detector: {error}")
+    return (model, class_names, detector), ""
+
+
+def start_worker() -> str:
+    """Start the OpenCV feed; returns an error message or '' on success.
+
+    Server (local camera) mode only - the browser path configures itself
+    through the webrtc_streamer callback, so the two pipelines can never
+    run simultaneously.
+    """
+    if CAMERA_MODE == camera_mode.MODE_BROWSER:
+        return ""
+    resources, error = load_recognition_resources()
+    if error:
+        return error
+    model, class_names, detector = resources
     return get_worker().start(model, class_names, detector)
+
+
+def render_browser_camera(worker) -> None:
+    """Browser webcam path (Streamlit Community Cloud).
+
+    webrtc_streamer captures the VISITOR'S camera in their browser and
+    pipes every frame into worker.recv; the annotated frame is sent back
+    for display. No OpenCV device is opened and the server-side worker is
+    never started - the two camera pipelines stay mutually exclusive.
+    """
+    if webrtc_streamer is None:
+        st.error("Browser camera mode needs the streamlit-webrtc package. "
+                 "Install the dependencies once: pip install -r "
+                 "requirements.txt")
+        return
+    resources, error = load_recognition_resources()
+    if error:
+        st.error(error)
+        return
+    model, class_names, detector = resources
+    worker.configure(model, class_names, detector)
+
+    try:
+        ctx = webrtc_streamer(
+            key="signbridge-browser-webcam",
+            mode=WebRtcMode.SENDRECV,
+            video_frame_callback=worker.recv,
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 640},
+                    "height": {"ideal": 480},
+                    "frameRate": {"ideal": 20, "max": 24},
+                },
+                "audio": False,
+            },
+            # No TURN credentials: same-host candidate pairs are tried
+            # by aiortc; the public STUN server only aids NAT traversal.
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            },
+            async_processing=True,
+        )
+    except Exception as error:  # noqa: BLE001 - a component failure must
+        # show a clear error, never crash the whole page.
+        st.error(f"Could not start the browser camera component: {error}")
+        return
+    worker.set_running(bool(ctx.state.playing))
+    if ctx.state.playing:
+        st.caption("Camera is streaming from this browser: allow camera "
+                   "access when your browser asks. Gestures are processed "
+                   "on the app server and the annotated preview is sent "
+                   "back here.")
+    else:
+        st.caption("Press Start on the preview and allow camera access "
+                   "when your browser asks. Deployed apps serve over HTTPS, "
+                   "which camera access requires.")
+    if worker.error and not ctx.state.playing:
+        st.error(worker.error)
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +1085,11 @@ with video_col:
     def camera_fragment():
         local_worker = get_worker()
         local_worker.touch()
+        if CAMERA_MODE == camera_mode.MODE_BROWSER:
+            # One pipeline only: the browser streamer IS the camera here -
+            # the OpenCV worker (and its Windows error messages) never run.
+            render_browser_camera(local_worker)
+            return
         live_now = local_worker.running and local_worker.is_alive()
 
         camera_title, camera_control = st.columns([1, 0.6], gap="small")
