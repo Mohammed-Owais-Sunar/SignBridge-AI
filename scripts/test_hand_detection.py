@@ -39,6 +39,7 @@ from src.feature_extractor import (
     split_hands,
 )
 from src.hand_detector import HandDetector, parse_hands
+from src import camera_lock
 
 WINDOW_TITLE = "SignBridge AI - Hand Detection (Phase 2.1)"
 MODEL_PATH = PROJECT_ROOT / "models" / "hand_landmarker.task"
@@ -143,10 +144,21 @@ def main():
         return
 
     # 3. Open the default webcam
+    # Advisory ownership (src/camera_lock.py): fail fast, naming the
+    # SignBridge process that already owns the camera, instead of OpenCV
+    # starving the reads.
+    try:
+        owned = camera_lock.acquire(0)
+    except camera_lock.CameraBusyError as busy:
+        print(f"Error: webcam 0 is already owned by another SignBridge "
+              f"process (PID {busy.holder_pid}) - stop it first.")
+        detector.close()
+        return
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         print("Error: Could not open the webcam.")
         print("Make sure a camera is connected and not being used by another application.")
+        owned.release()
         detector.close()
         return
 
@@ -246,6 +258,7 @@ def main():
     finally:
         # Always release the camera, close windows and free MediaPipe
         camera.release()
+        owned.release()
         cv2.destroyAllWindows()
         detector.close()
 

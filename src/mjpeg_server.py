@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DEFAULT_PORT = 8502          # first port tried (8502..8511 as fallback)
 IDLE_TIMEOUT_SECONDS = 30.0  # close a feed connection after this silence
 STARTUP_TIMEOUT_SECONDS = 30.0  # give a client this long to see first frame
+WRITE_TIMEOUT_SECONDS = 10.0    # drop a client that stops reading frames
 
 
 class _LatestFrame:
@@ -81,6 +82,33 @@ _server = None
 _port = None
 _lock = threading.Lock()
 
+# Connected feed clients (one per browser <img> pulling the preview).
+# The worker uses this as a keepalive signal: a backgrounded tab stops
+# sending page touches (browsers throttle JS timers), but its MJPEG
+# connection stays open - so the camera must not be released while a
+# viewer is still attached. When the tab closes, the socket drops,
+# the counter reaches 0 and the touch-based keepalive takes over.
+_clients = 0
+_clients_lock = threading.Lock()
+
+
+def connected_clients() -> int:
+    """Number of browser tabs currently streaming the preview feed."""
+    with _clients_lock:
+        return _clients
+
+
+def _client_enter() -> None:
+    global _clients
+    with _clients_lock:
+        _clients += 1
+
+
+def _client_leave() -> None:
+    global _clients
+    with _clients_lock:
+        _clients = max(0, _clients - 1)
+
 
 class _FeedHandler(BaseHTTPRequestHandler):
     """Streams the newest frame over and over (MJPEG multipart)."""
@@ -89,7 +117,16 @@ class _FeedHandler(BaseHTTPRequestHandler):
         if self.path.split("?")[0].rstrip("/") not in ("", "/feed"):
             self.send_error(404)
             return
+        _client_enter()
         try:
+            # A browser that stops reading (frozen tab, wedged socket) must
+            # not pin this handler thread: without a deadline, wfile.write()
+            # below can block forever once the TCP buffer fills. The timeout
+            # surfaces as OSError and lands in the except clause here.
+            try:
+                self.connection.settimeout(WRITE_TIMEOUT_SECONDS)
+            except OSError:
+                pass
             self.send_response(200)
             self.send_header(
                 "Content-Type",
@@ -131,6 +168,8 @@ class _FeedHandler(BaseHTTPRequestHandler):
                 last_seq = seq
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # browser closed the preview - completely normal
+        finally:
+            _client_leave()
 
     def log_message(self, *_args):
         """Keep the Streamlit console free of per-request noise."""

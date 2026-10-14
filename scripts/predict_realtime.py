@@ -75,6 +75,7 @@ from src.config import (CLASSES_PATH, MIN_PREDICTION_CONFIDENCE,
                         MODEL_PATH as HAND_MODEL_PATH, MODEL_URL,
                         PREDICTION_N_JOBS, PREDICTION_VOTE_WINDOW,
                         SIGN_CLASSES, TRAINED_MODEL_PATH)
+from src import camera_lock
 from src.feature_extractor import (HAND_FEATURE_LENGTH, MAX_FEATURE_LENGTH,
                                    build_sample, split_hands,
                                    validate_feature_vector)
@@ -153,6 +154,50 @@ def load_classifier():
 # -----------------------------------------------------------------------------
 # Prediction (features -> label + confidence)
 # -----------------------------------------------------------------------------
+def predict_proba_single(model, features):
+    """Class probabilities for ONE sample with scikit-learn's own shape:
+    shape ``(1, n_classes)``, exactly like ``model.predict_proba([features])``
+    but without re-validating the same row once per tree.
+
+    WHY (measured on this project, Windows, scikit-learn 1.9):
+        ForestClassifier.predict_proba() calls each tree's predict_proba()
+        with check_input=True, so the SAME 126-value row is validated 200
+        times per frame. One tree costs 0.206 ms with validation vs 0.014 ms
+        without -> ~19 ms of the old 23-27 ms query was redundant validation
+        (not model math). Validating ONCE and skipping the 199 redundant
+        checks cuts a query to ~5 ms and returns BIT-IDENTICAL
+        probabilities (the accumulation order and arithmetic are exactly
+        scikit-learn's own _accumulate_prediction; verified against
+        model.predict_proba on random and pipeline-generated vectors in
+        scripts/test_camera_lifecycle.py).
+
+    SAFETY: any unexpected sklearn internal -> plain model.predict_proba()
+    fallback, so a library change can never alter predictions silently.
+    """
+    validator = getattr(model, "_validate_X_predict", None)
+    estimators = getattr(model, "estimators_", None)
+    n_classes = getattr(model, "n_classes_", None)
+    if validator is None or not estimators or n_classes is None:
+        # Same shape contract as the fast path: (1, n_classes).
+        return model.predict_proba([features])
+    try:
+        X = validator(np.asarray([features]))          # validate exactly once
+        all_proba = [np.zeros((1, int(classes)), dtype=np.float64)
+                     for classes in np.atleast_1d(n_classes)]
+        for estimator in estimators:
+            tree_proba = estimator.predict_proba(X, check_input=False)
+            if isinstance(tree_proba, list):           # multi-output forest
+                for index, proba in enumerate(tree_proba):
+                    all_proba[index] += proba
+            else:
+                all_proba[0] += tree_proba
+        for proba in all_proba:
+            proba /= len(estimators)                   # mean over the forest
+        return all_proba[0] if len(all_proba) == 1 else all_proba
+    except Exception:  # noqa: BLE001 - never risk a wrong prediction
+        return model.predict_proba([features])
+
+
 def predict_gesture(model, features, class_names):
     """Predict ONE 126-value sample.
 
@@ -165,7 +210,7 @@ def predict_gesture(model, features, class_names):
     values - the caller then shows the reason instead of predicting.
     """
     validate_feature_vector(list(features), MAX_FEATURE_LENGTH)
-    probabilities = model.predict_proba([features])[0]
+    probabilities = predict_proba_single(model, features)[0]
 
     if not np.all(np.isfinite(probabilities)):
         raise ValueError("model returned non-finite probabilities")
@@ -384,11 +429,22 @@ def main() -> int:
         return 1
 
     # 3. Webcam -------------------------------------------------------------
+    # Advisory ownership first (src/camera_lock.py): a running web app or
+    # another preview instance fails fast HERE with its PID instead of
+    # OpenCV starving the reads further down.
+    try:
+        owned = camera_lock.acquire(0)
+    except camera_lock.CameraBusyError as busy:
+        print(f"Error: webcam 0 is already owned by another SignBridge "
+              f"process (PID {busy.holder_pid}) - stop it first (web app: "
+              "press Stop camera and wait for the camera to be released).")
+        return 1
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         print("Error: could not open the webcam.")
         print("Make sure a camera is connected and not used by another "
               "application.")
+        owned.release()
         return 1
 
     # MediaPipe hand model (Phase 2)
@@ -398,6 +454,7 @@ def main() -> int:
         print(f'  Invoke-WebRequest -Uri "{MODEL_URL}" '
               f'-OutFile "models\\hand_landmarker.task"')
         camera.release()
+        owned.release()
         return 1
     try:
         detector = HandDetector(model_path=HAND_MODEL_PATH, max_hands=2,
@@ -407,6 +464,7 @@ def main() -> int:
         print("Error: could not initialize the MediaPipe hand detector.")
         print(error)
         camera.release()
+        owned.release()
         return 1
 
     print("\nPreview: mirrored exactly once (cv2.flip(frame, 1) before "
@@ -623,6 +681,7 @@ def main() -> int:
 
     finally:
         camera.release()
+        owned.release()
         cv2.destroyAllWindows()
         detector.close()
 

@@ -1,4 +1,7 @@
-opencv-python
+# mediapipe hard-requires the CONTRIBUT build of OpenCV (its setup declares
+# opencv-contrib-python); installing both packages side by side overwrites
+# the same cv2 files, so this file pins only the contrib variant.
+opencv-contrib-python
 mediapipe==0.10.35
 scikit-learn
 joblib

@@ -23,6 +23,7 @@ support Python 3.13, so this module uses the newer Tasks API (`HandLandmarker`).
 The Tasks API needs the pretrained model file `models/hand_landmarker.task`.
 """
 
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -175,6 +176,12 @@ class HandDetector:
         # Video mode requires strictly increasing timestamps, so we count frames
         self._frame_number = 0
 
+        # Per-call stage timings of the LAST detect() call, in milliseconds.
+        # Splitting BGR->RGB conversion from the MediaPipe inference makes the
+        # worker's log able to show which stage costs what (repair branch
+        # instrumentation). Read with detector.last_ms after detect().
+        self.last_ms = {"color": 0.0, "infer": 0.0}
+
     def detect(self, frame_bgr):
         """Detect hands in one BGR frame and return the raw MediaPipe result.
 
@@ -184,19 +191,29 @@ class HandDetector:
         The result contains `.hand_landmarks` (one list of 21 landmarks per
         hand) and `.handedness` (one list of categories per hand). Use
         `parse_hands()` to turn it into `DetectedHand` objects.
+
+        After the call, `self.last_ms` holds {"color": ..., "infer": ...} -
+        the measured BGR->RGB conversion time and MediaPipe inference time
+        of this call (monotonic clock, milliseconds).
         """
         # OpenCV gives BGR frames, MediaPipe expects RGB
+        t_color = time.perf_counter()
         rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
         # Disabling writeable tells MediaPipe it does not need to copy the buffer
         rgb_frame.flags.writeable = False
 
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        color_ms = (time.perf_counter() - t_color) * 1000.0
 
         self._frame_number += 1
         timestamp_ms = self._frame_number * 33  # assume ~30 FPS
 
-        return self._landmarker.detect_for_video(image, timestamp_ms)
+        t_infer = time.perf_counter()
+        result = self._landmarker.detect_for_video(image, timestamp_ms)
+        self.last_ms = {"color": color_ms,
+                        "infer": (time.perf_counter() - t_infer) * 1000.0}
+        return result
 
     def draw_landmarks(self, frame_bgr, hands):
         """Draw every detected hand, its connections and its label (in place).

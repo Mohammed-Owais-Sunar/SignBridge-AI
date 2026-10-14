@@ -691,8 +691,7 @@ def start_worker() -> str:
             detector = get_detector()
         except Exception as error:  # noqa: BLE001 - MediaPipe init failure
             return f"Could not initialize the MediaPipe hand detector: {error}"
-    get_worker().start(model, class_names, detector)
-    return ""
+    return get_worker().start(model, class_names, detector)
 
 
 # ---------------------------------------------------------------------------
@@ -713,10 +712,12 @@ def present_sentence(sentence: str) -> str:
 
 
 def worker_state() -> str:
-    """ready | active | error - read from the worker, never invented."""
+    """ready | stopping | active | error - read from the worker, never invented."""
     worker = get_worker()
     if worker.error and not (worker.running and worker.is_alive()):
         return "error"
+    if worker.is_stopping():
+        return "stopping"
     return "active" if worker.running and worker.is_alive() else "ready"
 
 
@@ -744,6 +745,8 @@ def status_html(state: str):
         css, label = "sb-status sb-status-on", "Camera active"
     elif state == "error":
         css, label = "sb-status sb-status-error", "Camera error"
+    elif state == "stopping":
+        css, label = "sb-status", "Stopping camera..."
     else:
         css, label = "sb-status", "Ready"
     return (f'<div class="sb-statusbar"><span class="{css}">'
@@ -985,20 +988,34 @@ with video_col:
                              key="camera_toggle"):
                     local_worker.stop()   # thread releases the camera
                     st.session_state["sb_start_error"] = ""
+            elif local_worker.is_stopping():
+                # The old thread is still winding down (releasing the
+                # camera); a Start click would be refused with a message,
+                # so show the transient state instead of a dead button.
+                st.button("Stopping camera...", width="stretch",
+                          key="camera_toggle", disabled=True)
             elif st.button("Start camera", type="primary", width="stretch",
                            key="camera_toggle"):
                 # Stored, not rendered: this branch runs only on the click,
                 # while the message must survive the following ticks.
                 st.session_state["sb_start_error"] = start_worker() or ""
 
-        if not live_now:
+        if not live_now and not local_worker.is_stopping():
             start_error = st.session_state.get("sb_start_error") or ""
             if start_error:
                 st.error(start_error)
             elif local_worker.error:
                 st.error(local_worker.error)
 
-        if local_worker.running and local_worker.is_alive():
+        if local_worker.is_stopping():
+            st.markdown(
+                '<div class="sb-card"><div class="sb-video-off">'
+                "Stopping camera...</div>"
+                '<div class="sb-video-note">Releasing the webcam. The '
+                "Start button returns as soon as the camera is free.</div>"
+                "</div>",
+                unsafe_allow_html=True)
+        elif local_worker.running and local_worker.is_alive():
             # The browser pulls MJPEG frames straight from the feed server;
             # Streamlit never sees a single one of them. The note lives
             # INSIDE the card so both workspace columns are title + card

@@ -757,9 +757,43 @@ streamlit run app.py
 ```
 
 Opens `http://localhost:8501`. **Start camera** begins detection,
-**Stop camera** releases the webcam. Only one browser tab can hold the
-camera at a time. The OpenCV preview (`python scripts/predict_realtime.py`)
-keeps working independently.
+**Stop camera** releases the webcam. The webcam is owned by **one
+SignBridge process at a time**: a second app instance fails fast with an
+error naming the PID that already owns the camera. The OpenCV preview
+(`python scripts/predict_realtime.py`) and this app **cannot run at the
+same time** - stop one before starting the other. See
+[Camera in use](#camera-in-use) below.
+
+### Camera in use
+
+Windows webcams are exclusive per process, and OpenCV can *report* a
+successful open while another application already owns the device - the
+first frame read then fails. SignBridge defends against every case with
+a specific, actionable error instead of a generic failure:
+
+- **"Webcam N is already owned by another SignBridge process (PID ...)"
+  -** a second SignBridge copy (another terminal, another browser
+  machine's session via the same webcam, or `scripts/predict_realtime.py`
+  in a newer version that also takes the lock) holds the advisory lock in
+  `src/camera_lock.py`. Stop the named process, e.g.
+  `Get-Process -Id <PID>` followed by `Stop-Process -Id <PID>`, or close
+  that terminal/browser window. The OS releases the lock automatically
+  when the holder exits or crashes - a leftover lock *file* never blocks
+  a new run.
+- **"Webcam N opened but delivered no frames -"** another, non-SignBridge
+  application owns the camera (Teams/Zoom/Discord call, the Windows
+  Camera app, an older OpenCV preview). Close that application, then
+  press **Start camera** again.
+- **"Could not open the webcam (index N) -"** the camera is missing or
+  Windows camera privacy is off: Settings > Privacy & security > Camera.
+- Stopping is non-blocking: **Stop camera** returns immediately; while
+  the worker winds down the button shows *Stopping camera...* and Start
+  is refused with a message until the camera is free.
+- Closing the browser tab without pressing Stop is safe too: after 10 s
+  with no page attached **and** no preview client, the worker releases
+  the camera by itself.
+- A different camera or backend can be selected in `src/config.py`
+  (`CAMERA_INDEX`, `CAMERA_BACKEND`) without code changes.
 
 ### Performance architecture (the ~6 FPS fix)
 
@@ -791,13 +825,19 @@ The fixed version runs three independent rates:
 Heavy resources (Random Forest + class list, MediaPipe detector,
 evaluation metrics) load once via `st.cache_resource` / `st.cache_data`.
 The page "touches" the worker on every fragment run; after 10 s without
-a page the camera is released automatically (closed tab, no Stop click).
+a page **and** without a browser still streaming the preview, the camera
+is released automatically (closed tab, no Stop click). The feed-client
+check matters because backgrounded tabs stop touching (browsers throttle
+JS timers) while their preview connection stays open.
 
 Measured on this machine with `python scripts/measure_web_performance.py`
-(headless, no browser): **25.4 FPS delivered** to the feed client
-(worker 21-30 FPS depending on whether a hand is in view; MediaPipe
-detect ~24 ms, prediction ~11 ms, JPEG encode ~1 ms per frame) against
-the old ~6 FPS cap. Exact numbers depend on the machine.
+(headless, webcam, a hand in view): **30.1 FPS delivered** to the feed
+client at the camera's native ~30 FPS (worker ~30 FPS end to end;
+per-frame stage averages: capture ~12 ms, MediaPipe detect ~18 ms,
+`build_sample` ~0.04 ms, Random Forest prediction ~2.4 ms, JPEG encode
+~0.7 ms) against the old ~6 FPS cap. In the live browser the rendered
+preview was measured at ~39 composited updates/s. Exact numbers depend
+on the machine.
 
 ### What the page shows
 

@@ -133,7 +133,25 @@ PREDICTION_VOTE_WINDOW = 5
 # BIT-IDENTICAL probabilities). Prediction therefore forces n_jobs=1 on the
 # in-memory model at load time. The saved .joblib file is not modified, and
 # results are provably unchanged.
+#
+# NOTE (repair branch): n_jobs only matters for the FALLBACK path now.
+# scripts/predict_realtime.predict_proba_single() validates the sample once
+# instead of once per tree (scikit-learn re-validates the same row for each
+# of the 200 trees: measured 23-27 ms/query -> 5 ms/query, BIT-IDENTICAL
+# probabilities; verified by scripts/test_camera_lifecycle.py).
 PREDICTION_N_JOBS = 1
+
+# -----------------------------------------------------------------------------
+# Webcam source (used by src/camera_worker.py, the Streamlit live feed)
+# -----------------------------------------------------------------------------
+# CAMERA_INDEX: 0 is the system default camera; raise it (1, 2, ...) when the
+# default index belongs to a built-in camera you do not want to use.
+# CAMERA_BACKEND: "" = let OpenCV choose (current default, unchanged
+# behaviour). On Windows you can pin the backend to "MSMF" or "DSHOW" when
+# auto-selection opens the wrong device or probes slowly (measured: auto
+# tries FFMPEG first, which cannot open cameras, before succeeding).
+CAMERA_INDEX = 0
+CAMERA_BACKEND = ""
 
 # -----------------------------------------------------------------------------
 # Phase 6 - sentence builder (src/sentence_builder.py)
